@@ -2,7 +2,10 @@ module github.com/yukinagae/genkit-golang-openai-sample
 
 go 1.23.0
 
-require github.com/firebase/genkit/go v0.1.1
+require (
+	github.com/firebase/genkit/go v0.1.1
+	github.com/sashabaranov/go-openai v1.29.0
+)
 
 require (
 	cloud.google.com/go v0.115.0 // indirect

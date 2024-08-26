@@ -12,6 +12,8 @@ import (
 
 	// Import the Google AI plugin.
 	"github.com/firebase/genkit/go/plugins/googleai"
+	// Import the OpenAI plugin.
+	"github.com/yukinagae/genkit-golang-openai-sample/plugins/openai"
 )
 
 func main() {
@@ -25,11 +27,22 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Initialize the OpenAI plugin. When you pass an empty string for the
+	// apiKey parameter, the OpenAI plugin will use the value from the
+	// OPENAI_API_KEY environment variable, which is the recommended
+	// practice.
+	if err := openai.Init(ctx, nil); err != nil {
+		log.Fatal(err)
+	}
+
 	// Define a simple flow that prompts an LLM to generate menu suggestions.
 	genkit.DefineFlow("menuSuggestionFlow", func(ctx context.Context, input string) (string, error) {
 		// The Google AI API provides access to several generative models. Here,
 		// we specify gemini-1.5-flash.
-		m := googleai.Model("gemini-1.5-flash")
+		// m := googleai.Model("gemini-1.5-flash")
+
+		// lookup OpenAI model
+		m := openai.Model("gpt-4o-mini") // or "gpt-4o-mini"
 		if m == nil {
 			return "", errors.New("menuSuggestionFlow: failed to find model")
 		}
