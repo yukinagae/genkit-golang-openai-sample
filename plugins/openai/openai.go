@@ -196,10 +196,6 @@ func convertRequest(model string, input *ai.GenerateRequest) (goopenai.ChatCompl
 		case ai.OutputFormatJSON:
 			chatCompletionRequest.ResponseFormat = &goopenai.ChatCompletionResponseFormat{
 				Type: goopenai.ChatCompletionResponseFormatTypeJSONObject,
-				JSONSchema: &goopenai.ChatCompletionResponseFormatJSONSchema{
-					Schema: &MapJSONMarshaller{Data: input.Output.Schema},
-					Strict: true,
-				},
 			}
 		case ai.OutputFormatText:
 			chatCompletionRequest.ResponseFormat = &goopenai.ChatCompletionResponseFormat{
@@ -429,16 +425,3 @@ func mapToJSONRawMessage(data map[string]any) (json.RawMessage, error) {
 	}
 	return json.RawMessage(jsonBytes), nil
 }
-
-// func mapToJSONSchema(data map[string]any) (*goopenai.ChatCompletionResponseFormatJSONSchema, error) {
-// 	jsonData, err := json.Marshal(data)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	jsonSchema := &goopenai.ChatCompletionResponseFormatJSONSchema{}
-// 	if err := json.Unmarshal(jsonData, jsonSchema); err != nil {
-// 		return nil, fmt.Errorf("unmarshal failed to parse json string %s: %w", jsonData, err)
-// 	}
-// 	return jsonSchema, nil
-// }

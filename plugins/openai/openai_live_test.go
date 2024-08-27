@@ -2,8 +2,10 @@ package openai_test
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -68,7 +70,7 @@ func TestLive(t *testing.T) {
 			ctx,                  //
 			model,                //
 			ai.WithCandidates(1), //
-			ai.WithTextPrompt("what is a gablorken of 2 over 3.5?"), //
+			ai.WithTextPrompt("What is a gablorken of 2 over 3.5?"), //
 			ai.WithTools(gablorkenTool),                             //
 		)
 		if err != nil {
@@ -78,6 +80,34 @@ func TestLive(t *testing.T) {
 		const want = "12.25"
 		if !strings.Contains(out, want) {
 			t.Errorf("got %q, expecting it to contain %q", out, want)
+		}
+	})
+
+	t.Run("structured output", func(t *testing.T) {
+		type User struct {
+			Name string
+			Age  int
+		}
+		resp, err := ai.Generate(
+			ctx,                  //
+			model,                //
+			ai.WithCandidates(1), //
+			ai.WithTextPrompt("Create dummy user data with the name John and age 32."), //
+			ai.WithOutputSchema(User{}), //
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		respText := resp.Candidates[0].Message.Content[0].Text
+
+		out := &User{}
+		if err := json.Unmarshal([]byte(respText), out); err != nil {
+			t.Fatal(err)
+		}
+
+		want := &User{Name: "John", Age: 32}
+		if !reflect.DeepEqual(out, want) {
+			t.Errorf("got %q, expecting %q", out, want)
 		}
 	})
 }
