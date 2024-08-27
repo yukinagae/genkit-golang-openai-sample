@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"sync"
 
 	"github.com/firebase/genkit/go/ai"
@@ -25,30 +26,16 @@ var state struct {
 
 var (
 	knownCaps = map[string]ai.ModelCapabilities{
-		goopenai.GPT4o: ai.ModelCapabilities{
-			Multiturn:  true,
-			Tools:      true,
-			SystemRole: true,
-			Media:      true,
-		},
-		goopenai.GPT4oMini: ai.ModelCapabilities{
-			Multiturn:  true,
-			Tools:      true,
-			SystemRole: true,
-			Media:      true,
-		},
-		goopenai.GPT4Turbo: ai.ModelCapabilities{
-			Multiturn:  true,
-			Tools:      true,
-			SystemRole: true,
-			Media:      true,
-		},
-		goopenai.GPT4: ai.ModelCapabilities{
-			Multiturn:  true,
-			Tools:      true,
-			SystemRole: true,
-			Media:      false,
-		},
+		goopenai.GPT4o:     Multimodal,
+		goopenai.GPT4oMini: Multimodal,
+		goopenai.GPT4Turbo: Multimodal,
+		goopenai.GPT4:      BasicText,
+	}
+
+	modelsSupportingResponseFormats = []string{
+		goopenai.GPT4o,     //
+		goopenai.GPT4oMini, //
+		goopenai.GPT4Turbo, //
 	}
 )
 
@@ -152,24 +139,41 @@ func generate(
 	input *ai.GenerateRequest,
 	cb func(context.Context, *ai.GenerateResponseChunk) error, // TODO: implement streaming
 ) (*ai.GenerateResponse, error) {
-	var parts []goopenai.ChatCompletionMessage
-	for _, m := range input.Messages {
-		ps, err := convertParts(m.Content)
-		if err != nil {
-			return nil, err
-		}
-		parts = append(parts, ps...)
+	req, err := convertRequest(model, input)
+	if err != nil {
+		return nil, err
 	}
-
-	tools, err := convertTools(input.Tools)
+	resp, err := client.CreateChatCompletion(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 
+	jsonMode := false
+	if input.Output != nil &&
+		input.Output.Format == ai.OutputFormatJSON {
+		jsonMode = true
+	}
+	r := translateResponse(resp, jsonMode)
+	r.Request = input
+	return r, nil
+}
+
+func convertRequest(model string, input *ai.GenerateRequest) (goopenai.ChatCompletionRequest, error) {
+	messages, err := convertMessages(input.Messages)
+	if err != nil {
+		return goopenai.ChatCompletionRequest{}, err
+	}
+
+	tools, err := convertTools(input.Tools)
+	if err != nil {
+		return goopenai.ChatCompletionRequest{}, err
+	}
+
 	chatCompletionRequest := goopenai.ChatCompletionRequest{
 		Model:    model,
-		Messages: parts,
+		Messages: messages,
 		Tools:    tools,
+		N:        input.Candidates,
 	}
 
 	if c, ok := input.Config.(*ai.GenerationCommonConfig); ok && c != nil {
@@ -182,31 +186,128 @@ func generate(
 		if c.Temperature != 0 {
 			chatCompletionRequest.Temperature = float32(c.Temperature)
 		}
-		if c.TopK != 0 {
-			chatCompletionRequest.N = c.TopK
-		}
 		if c.TopP != 0 {
 			chatCompletionRequest.TopP = float32(c.TopP)
 		}
 	}
 
-	resp, err := client.CreateChatCompletion(ctx, chatCompletionRequest)
-	if err != nil {
-		return nil, err
+	if input.Output != nil &&
+		input.Output.Format != "" &&
+		slices.Contains(modelsSupportingResponseFormats, model) {
+		switch input.Output.Format {
+		case ai.OutputFormatJSON:
+			chatCompletionRequest.ResponseFormat = &goopenai.ChatCompletionResponseFormat{
+				Type:       goopenai.ChatCompletionResponseFormatTypeJSONObject,
+				JSONSchema: nil, // TODO: implement JSON schema
+			}
+		case ai.OutputFormatText:
+			chatCompletionRequest.ResponseFormat = &goopenai.ChatCompletionResponseFormat{
+				Type: goopenai.ChatCompletionResponseFormatTypeText,
+			}
+		default:
+			return goopenai.ChatCompletionRequest{}, fmt.Errorf("unknown part type in a request")
+		}
 	}
-	r := translateResponse(resp)
-	r.Request = input
-	return r, nil
+
+	return chatCompletionRequest, nil
+}
+
+func convertMessages(messages []*ai.Message) ([]goopenai.ChatCompletionMessage, error) {
+	var msgs []goopenai.ChatCompletionMessage
+	for _, m := range messages {
+		role := fromAIRoleToOpenAIRole(m.Role)
+		switch role {
+		case goopenai.ChatMessageRoleUser:
+			var multiContent []goopenai.ChatMessagePart
+			for _, part := range m.Content {
+				p, err := toOpenAiTextAndMedia(part)
+				if err != nil {
+					return nil, err
+				}
+				multiContent = append(multiContent, p)
+			}
+			msgs = append(msgs, goopenai.ChatCompletionMessage{
+				Role:         role,
+				MultiContent: multiContent,
+			})
+		case goopenai.ChatMessageRoleSystem:
+			msgs = append(msgs, goopenai.ChatCompletionMessage{
+				Role:    role,
+				Content: m.Content[0].Text,
+			})
+		case goopenai.ChatMessageRoleAssistant:
+			var toolCalls []goopenai.ToolCall
+			for _, part := range m.Content {
+				if !part.IsToolRequest() {
+					continue
+				}
+				toolCalls = append(toolCalls, goopenai.ToolCall{
+					ID:   part.ToolRequest.Name,
+					Type: goopenai.ToolTypeFunction,
+					Function: goopenai.FunctionCall{
+						Name:      part.ToolRequest.Name,
+						Arguments: mapToJSONString(part.ToolRequest.Input),
+					},
+				})
+			}
+			if len(toolCalls) > 0 {
+				msgs = append(msgs, goopenai.ChatCompletionMessage{
+					Role:      role,
+					ToolCalls: toolCalls,
+				})
+			} else {
+				msgs = append(msgs, goopenai.ChatCompletionMessage{
+					Role:    role,
+					Content: m.Content[0].Text,
+				})
+			}
+		case goopenai.ChatMessageRoleTool:
+			for _, part := range m.Content {
+				msgs = append(msgs, goopenai.ChatCompletionMessage{
+					Role:       role,
+					ToolCallID: part.ToolResponse.Name,
+					Content:    mapToJSONString(part.ToolResponse.Output),
+					Name:       part.ToolResponse.Name,
+				})
+			}
+		default:
+			return nil, fmt.Errorf("Unknown OpenAI Role %s", role)
+		}
+	}
+	return msgs, nil
+}
+
+func toOpenAiTextAndMedia(part *ai.Part) (goopenai.ChatMessagePart, error) {
+	switch {
+	case part.IsText():
+		return goopenai.ChatMessagePart{
+			Type: goopenai.ChatMessagePartTypeText,
+			Text: part.Text,
+		}, nil
+	case part.IsMedia():
+		return goopenai.ChatMessagePart{
+			Type: goopenai.ChatMessagePartTypeImageURL,
+			ImageURL: &goopenai.ChatMessageImageURL{
+				URL:    part.Text,
+				Detail: goopenai.ImageURLDetailAuto,
+			},
+		}, nil
+	default:
+		return goopenai.ChatMessagePart{}, fmt.Errorf("unknown part type in a request")
+	}
 }
 
 func convertTools(inTools []*ai.ToolDefinition) ([]goopenai.Tool, error) {
 	var outTools []goopenai.Tool
 	for _, t := range inTools {
-		inputSchema := mapToJSONString(t.InputSchema) // TODO: resolve $ref
+		parameters, err := mapToJSONRawMessage(t.InputSchema) // TODO: resolve $ref
+		if err != nil {
+			return nil, err
+		}
 		fd := &goopenai.FunctionDefinition{
 			Name:        t.Name,
 			Description: t.Description,
-			Parameters:  inputSchema,
+			Parameters:  parameters,
 		}
 		outTool := goopenai.Tool{
 			Type:     goopenai.ToolTypeFunction,
@@ -217,80 +318,40 @@ func convertTools(inTools []*ai.ToolDefinition) ([]goopenai.Tool, error) {
 	return outTools, nil
 }
 
-// convertParts converts a slice of *ai.Part to a slice of goopenai.ChatCompletionMessage.
-func convertParts(parts []*ai.Part) ([]goopenai.ChatCompletionMessage, error) {
-	res := make([]goopenai.ChatCompletionMessage, 0, len(parts))
-	for _, p := range parts {
-		part, err := convertPart(p)
-		if err != nil {
-			return nil, err
-		}
-		res = append(res, part)
-	}
-	return res, nil
-}
-
-// convertPart converts a *ai.Part to a goopenai.ChatCompletionMessage.
-func convertPart(p *ai.Part) (goopenai.ChatCompletionMessage, error) {
-	switch {
-	case p.IsText():
-		return goopenai.ChatCompletionMessage{
-			Role:    goopenai.ChatMessageRoleUser,
-			Content: p.Text,
-		}, nil
-	case p.IsMedia():
-		panic("not yet implemented") // TODO: implement Media part
-	case p.IsData():
-		panic(fmt.Sprintf("%s does not support Data parts", provider))
-	case p.IsToolResponse():
-		return goopenai.ChatCompletionMessage{
-			Role:    goopenai.ChatMessageRoleAssistant,
-			Content: mapToJSONString(p.ToolResponse.Output),
-			Name:    p.ToolResponse.Name,
-		}, nil
-	case p.IsToolRequest():
-		return goopenai.ChatCompletionMessage{
-			Role:    goopenai.ChatMessageRoleAssistant,
-			Content: mapToJSONString(p.ToolRequest.Input),
-			Name:    p.ToolRequest.Name,
-		}, nil
-	default:
-		panic("unknown part type in a request")
-	}
-}
-
 // Translate from a goopenai.ChatCompletionResponse to a ai.GenerateResponse.
-func translateResponse(resp goopenai.ChatCompletionResponse) *ai.GenerateResponse {
-	r := &ai.GenerateResponse{
-		Usage: &ai.GenerationUsage{
-			InputTokens:  resp.Usage.PromptTokens,
-			OutputTokens: resp.Usage.CompletionTokens,
-			TotalTokens:  resp.Usage.TotalTokens,
-		},
-	}
+func translateResponse(resp goopenai.ChatCompletionResponse, jsonMode bool) *ai.GenerateResponse {
+	r := &ai.GenerateResponse{}
+
 	for _, c := range resp.Choices {
-		r.Candidates = append(r.Candidates, translateCandidate(c))
+		r.Candidates = append(r.Candidates, translateCandidate(c, jsonMode))
 	}
+
+	r.Usage = &ai.GenerationUsage{
+		InputTokens:  resp.Usage.PromptTokens,
+		OutputTokens: resp.Usage.CompletionTokens,
+		TotalTokens:  resp.Usage.TotalTokens,
+	}
+	r.Custom = resp // TODO: for what?
 	return r
 }
 
-func toOpenAIRole(role string) ai.Role {
-	switch role {
-	case goopenai.ChatMessageRoleUser:
-		return ai.RoleUser
-	case goopenai.ChatMessageRoleAssistant:
-		return ai.RoleModel
-	case goopenai.ChatMessageRoleSystem:
-		return ai.RoleSystem
-	case goopenai.ChatMessageRoleTool, goopenai.ChatMessageRoleFunction:
-		return ai.RoleTool
+func fromAIRoleToOpenAIRole(aiRole ai.Role) string {
+	switch aiRole {
+	case ai.RoleUser:
+		return goopenai.ChatMessageRoleUser
+	case ai.RoleSystem:
+		return goopenai.ChatMessageRoleSystem
+	case ai.RoleModel:
+		return goopenai.ChatMessageRoleAssistant
+	case ai.RoleTool:
+		return goopenai.ChatMessageRoleTool
 	default:
-		panic(fmt.Sprintf("unknown role: %s", role))
+		panic(fmt.Sprintf("Unknown ai.Role: %s", aiRole))
 	}
 }
 
 // translateCandidate translates from a goopenai.ChatCompletionChoice to an ai.Candidate.
-func translateCandidate(choice goopenai.ChatCompletionChoice) *ai.Candidate {
+func translateCandidate(choice goopenai.ChatCompletionChoice, jsonMode bool) *ai.Candidate {
 	c := &ai.Candidate{
 		Index: choice.Index,
 	}
@@ -309,37 +370,29 @@ func translateCandidate(choice goopenai.ChatCompletionChoice) *ai.Candidate {
 		c.FinishReason = ai.FinishReasonUnknown
 	}
 	m := &ai.Message{
-		Role: toOpenAIRole(choice.Message.Role),
+		Role: ai.RoleModel,
 	}
 
-	// handle single content
-	if choice.Message.Content != "" {
-		m.Content = append(m.Content, ai.NewTextPart(choice.Message.Content))
+	// handle tool calls
+	var toolRequestParts []*ai.Part
+	for _, toolCall := range choice.Message.ToolCalls {
+		toolRequestParts = append(toolRequestParts, ai.NewToolRequestPart(&ai.ToolRequest{
+			Name:  toolCall.Function.Name,
+			Input: jsonStringToMap(toolCall.Function.Arguments),
+		}))
+	}
+	if len(toolRequestParts) > 0 {
+		m.Content = toolRequestParts
 		c.Message = m
 		return c
 	}
 
-	// handle multi-content
-	for _, part := range choice.Message.MultiContent {
-		switch {
-		case part.Type == goopenai.ChatMessagePartTypeText:
-			p := ai.NewTextPart(part.Text)
-			m.Content = append(m.Content, p)
-		case part.Type == goopenai.ChatMessagePartTypeImageURL:
-			panic("not yet implemented") // TODO: implement Media part
-		case choice.Message.ToolCalls != nil:
-			for _, toolCall := range choice.Message.ToolCalls {
-				p := ai.NewToolRequestPart(&ai.ToolRequest{
-					Name:  toolCall.Function.Name,
-					Input: jsonStringToMap(toolCall.Function.Arguments),
-				})
-				m.Content = append(m.Content, p)
-			}
-			continue
-		default:
-			panic(fmt.Sprintf("unknown part %#v", part))
-		}
+	if jsonMode {
+		m.Content = append(m.Content, ai.NewDataPart(choice.Message.Content))
+	} else {
+		m.Content = append(m.Content, ai.NewTextPart(choice.Message.Content))
 	}
+
 	c.Message = m
 	return c
 }
@@ -347,7 +400,7 @@ func translateCandidate(choice goopenai.ChatCompletionChoice) *ai.Candidate {
 func jsonStringToMap(jsonString string) map[string]any {
 	var result map[string]any
 	if err := json.Unmarshal([]byte(jsonString), &result); err != nil {
-		panic(fmt.Sprintf("unmarshal failed to parse json string %s: %w", jsonString, err))
+		panic(fmt.Errorf("unmarshal failed to parse json string %s: %w", jsonString, err))
 	}
 	return result
 }
@@ -355,7 +408,28 @@ func jsonStringToMap(jsonString string) map[string]any {
 func mapToJSONString(data map[string]any) string {
 	jsonBytes, err := json.Marshal(data)
 	if err != nil {
-		panic(fmt.Errorf("failed to marshal map to JSON string: data, %v %w", data, err))
+		panic(fmt.Errorf("failed to marshal map to JSON string: data, %#v %w", data, err))
 	}
 	return string(jsonBytes)
 }
+
+func mapToJSONRawMessage(data map[string]any) (json.RawMessage, error) {
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal map to JSON string: data, %#v %w", data, err)
+	}
+	return json.RawMessage(jsonBytes), nil
+}
+
+// func mapToJSONSchema(data map[string]any) (*goopenai.ChatCompletionResponseFormatJSONSchema, error) {
+// 	jsonData, err := json.Marshal(data)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+
+// 	jsonSchema := &goopenai.ChatCompletionResponseFormatJSONSchema{}
+// 	if err := json.Unmarshal(jsonData, jsonSchema); err != nil {
+// 		return nil, fmt.Errorf("unmarshal failed to parse json string %s: %w", jsonData, err)
+// 	}
+// 	return jsonSchema, nil
+// }
