@@ -35,6 +35,12 @@ var (
 		goopenai.GPT4oMini, //
 		goopenai.GPT4Turbo, //
 	}
+
+	knownEmbedders = []string{
+		string(goopenai.SmallEmbedding3),
+		string(goopenai.LargeEmbedding3),
+		string(goopenai.AdaEmbeddingV2),
+	}
 )
 
 // Config is the configuration for the plugin.
@@ -46,7 +52,6 @@ type Config struct {
 
 // Init initializes the plugin and all known models.
 // After calling Init, you may call [DefineModel] to create and register any additional generative models.
-// TODO: initialize embedders
 func Init(ctx context.Context, cfg *Config) (err error) {
 	if cfg == nil {
 		cfg = &Config{}
@@ -75,6 +80,9 @@ func Init(ctx context.Context, cfg *Config) (err error) {
 	state.initted = true
 	for model, caps := range knownCaps {
 		defineModel(model, caps)
+	}
+	for _, e := range knownEmbedders {
+		defineEmbedder(e)
 	}
 	return nil
 }
@@ -122,10 +130,59 @@ func IsDefinedModel(name string) bool {
 	return ai.IsDefinedModel(provider, name)
 }
 
+// DefineEmbedder defines an embedder with a given name.
+func DefineEmbedder(name string) ai.Embedder {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if !state.initted {
+		panic(provider + ".Init not called")
+	}
+	return defineEmbedder(name)
+}
+
+// IsDefinedEmbedder reports whether the named [Embedder] is defined by this plugin.
+func IsDefinedEmbedder(name string) bool {
+	return ai.IsDefinedEmbedder(provider, name)
+}
+
+// requires state.mu
+func defineEmbedder(name string) ai.Embedder {
+	return ai.DefineEmbedder(provider, name, func(ctx context.Context, input *ai.EmbedRequest) (*ai.EmbedResponse, error) {
+		var data []string
+		for _, doc := range input.Documents {
+			for _, p := range doc.Content {
+				data = append(data, p.Text)
+			}
+		}
+
+		req := goopenai.EmbeddingRequest{
+			Input: data,
+			Model: goopenai.EmbeddingModel(name),
+		}
+
+		embRes, err := state.client.CreateEmbeddings(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+
+		var res ai.EmbedResponse
+		for _, emb := range embRes.Data {
+			res.Embeddings = append(res.Embeddings, &ai.DocumentEmbedding{Embedding: emb.Embedding})
+		}
+		return &res, nil
+	})
+}
+
 // Model returns the [ai.Model] with the given name.
 // It returns nil if the model was not defined.
 func Model(name string) ai.Model {
 	return ai.LookupModel(provider, name)
+}
+
+// Embedder returns the [ai.Embedder] with the given name.
+// It returns nil if the embedder was not defined.
+func Embedder(name string) ai.Embedder {
+	return ai.LookupEmbedder(provider, name)
 }
 
 func generate(
@@ -139,6 +196,7 @@ func generate(
 	if err != nil {
 		return nil, err
 	}
+
 	resp, err := client.CreateChatCompletion(ctx, req)
 	if err != nil {
 		return nil, err
@@ -149,6 +207,7 @@ func generate(
 		input.Output.Format == ai.OutputFormatJSON {
 		jsonMode = true
 	}
+
 	r := translateResponse(resp, jsonMode)
 	r.Request = input
 	return r, nil

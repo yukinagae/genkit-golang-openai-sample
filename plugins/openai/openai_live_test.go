@@ -32,7 +32,28 @@ func TestLive(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	embedder := openai.Embedder("text-embedding-3-small")
 	model := openai.Model("gpt-4o-mini")
+
+	t.Run("embedder", func(t *testing.T) {
+		res, err := ai.Embed(ctx, embedder, ai.WithEmbedText("yellow banana"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := res.Embeddings[0].Embedding
+		// There's not a whole lot we can test about the result.
+		// Just do a few sanity checks.
+		if len(out) < 100 {
+			t.Errorf("embedding vector looks too short: len(out)=%d", len(out))
+		}
+		var normSquared float32
+		for _, x := range out {
+			normSquared += x * x
+		}
+		if normSquared < 0.9 || normSquared > 1.1 {
+			t.Errorf("embedding vector not unit length: %f", normSquared)
+		}
+	})
 
 	t.Run("generate", func(t *testing.T) {
 		resp, err := ai.Generate(
