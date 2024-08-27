@@ -72,9 +72,7 @@ func Init(ctx context.Context, cfg *Config) (err error) {
 		}
 	}
 
-	// TODO: Implement goopenai.NewClientWithConfig to allow passing additional configuration options.
 	client := goopenai.NewClient(apiKey)
-
 	state.client = client
 	state.initted = true
 	for model, caps := range knownCaps {
@@ -197,8 +195,11 @@ func convertRequest(model string, input *ai.GenerateRequest) (goopenai.ChatCompl
 		switch input.Output.Format {
 		case ai.OutputFormatJSON:
 			chatCompletionRequest.ResponseFormat = &goopenai.ChatCompletionResponseFormat{
-				Type:       goopenai.ChatCompletionResponseFormatTypeJSONObject,
-				JSONSchema: nil, // TODO: implement JSON schema
+				Type: goopenai.ChatCompletionResponseFormatTypeJSONObject,
+				JSONSchema: &goopenai.ChatCompletionResponseFormatJSONSchema{
+					Schema: &MapJSONMarshaller{Data: input.Output.Schema},
+					Strict: true,
+				},
 			}
 		case ai.OutputFormatText:
 			chatCompletionRequest.ResponseFormat = &goopenai.ChatCompletionResponseFormat{
@@ -210,6 +211,14 @@ func convertRequest(model string, input *ai.GenerateRequest) (goopenai.ChatCompl
 	}
 
 	return chatCompletionRequest, nil
+}
+
+type MapJSONMarshaller struct {
+	Data map[string]any
+}
+
+func (m *MapJSONMarshaller) MarshalJSON() ([]byte, error) {
+	return json.Marshal(m.Data)
 }
 
 func convertMessages(messages []*ai.Message) ([]goopenai.ChatCompletionMessage, error) {
@@ -300,7 +309,7 @@ func toOpenAiTextAndMedia(part *ai.Part) (goopenai.ChatMessagePart, error) {
 func convertTools(inTools []*ai.ToolDefinition) ([]goopenai.Tool, error) {
 	var outTools []goopenai.Tool
 	for _, t := range inTools {
-		parameters, err := mapToJSONRawMessage(t.InputSchema) // TODO: resolve $ref
+		parameters, err := mapToJSONRawMessage(t.InputSchema)
 		if err != nil {
 			return nil, err
 		}
@@ -331,7 +340,7 @@ func translateResponse(resp goopenai.ChatCompletionResponse, jsonMode bool) *ai.
 		OutputTokens: resp.Usage.CompletionTokens,
 		TotalTokens:  resp.Usage.TotalTokens,
 	}
-	r.Custom = resp // TODO: for what?
+	r.Custom = resp
 	return r
 }
 
