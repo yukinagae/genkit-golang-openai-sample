@@ -54,7 +54,7 @@ func convertRequest(model string, input *ai.GenerateRequest) (goopenai.ChatCompl
 				Type: goopenai.ChatCompletionResponseFormatTypeText,
 			}
 		default:
-			return goopenai.ChatCompletionRequest{}, fmt.Errorf("unknown part type in a request")
+			return goopenai.ChatCompletionRequest{}, fmt.Errorf("unknown output format in a request: %s", input.Output.Format)
 		}
 	}
 
@@ -68,12 +68,12 @@ func convertMessages(messages []*ai.Message) ([]goopenai.ChatCompletionMessage, 
 		switch role {
 		case goopenai.ChatMessageRoleUser:
 			var multiContent []goopenai.ChatMessagePart
-			for _, part := range m.Content {
-				p, err := convertPart(part)
+			for _, p := range m.Content {
+				part, err := convertPart(p)
 				if err != nil {
 					return nil, err
 				}
-				multiContent = append(multiContent, p)
+				multiContent = append(multiContent, part)
 			}
 			msgs = append(msgs, goopenai.ChatCompletionMessage{
 				Role:         role,
@@ -86,16 +86,16 @@ func convertMessages(messages []*ai.Message) ([]goopenai.ChatCompletionMessage, 
 			})
 		case goopenai.ChatMessageRoleAssistant:
 			var toolCalls []goopenai.ToolCall
-			for _, part := range m.Content {
-				if !part.IsToolRequest() {
+			for _, p := range m.Content {
+				if !p.IsToolRequest() {
 					continue
 				}
 				toolCalls = append(toolCalls, goopenai.ToolCall{
-					ID:   part.ToolRequest.Name,
+					ID:   p.ToolRequest.Name,
 					Type: goopenai.ToolTypeFunction,
 					Function: goopenai.FunctionCall{
-						Name:      part.ToolRequest.Name,
-						Arguments: mapToJSONString(part.ToolRequest.Input),
+						Name:      p.ToolRequest.Name,
+						Arguments: mapToJSONString(p.ToolRequest.Input),
 					},
 				})
 			}
@@ -111,12 +111,14 @@ func convertMessages(messages []*ai.Message) ([]goopenai.ChatCompletionMessage, 
 				})
 			}
 		case goopenai.ChatMessageRoleTool:
-			for _, part := range m.Content {
+			for _, p := range m.Content {
+				if !p.IsToolResponse() {
+					continue
+				}
 				msgs = append(msgs, goopenai.ChatCompletionMessage{
 					Role:       role,
-					ToolCallID: part.ToolResponse.Name,
-					Content:    mapToJSONString(part.ToolResponse.Output),
-					Name:       part.ToolResponse.Name,
+					ToolCallID: p.ToolResponse.Name,
+					Content:    mapToJSONString(p.ToolResponse.Output),
 				})
 			}
 		default:
@@ -168,14 +170,13 @@ func convertTools(inTools []*ai.ToolDefinition) ([]goopenai.Tool, error) {
 		if err != nil {
 			return nil, err
 		}
-		fd := &goopenai.FunctionDefinition{
-			Name:        t.Name,
-			Description: t.Description,
-			Parameters:  parameters,
-		}
 		outTool := goopenai.Tool{
-			Type:     goopenai.ToolTypeFunction,
-			Function: fd,
+			Type: goopenai.ToolTypeFunction,
+			Function: &goopenai.FunctionDefinition{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  parameters,
+			},
 		}
 		outTools = append(outTools, outTool)
 	}
