@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 
@@ -43,9 +42,6 @@ func main() {
 
 		// lookup OpenAI model
 		m := openai.Model("gpt-4o-mini") // or "gpt-4o-mini"
-		if m == nil {
-			return "", errors.New("menuSuggestionFlow: failed to find model")
-		}
 
 		// Construct a request and send it to the model API.
 		resp, err := m.Generate(ctx,
