@@ -12,7 +12,7 @@ import (
 	// Import the Google AI plugin.
 	"github.com/firebase/genkit/go/plugins/googleai"
 	// Import the OpenAI plugin.
-	"github.com/yukinagae/genkit-golang-openai-sample/plugins/openai"
+	"github.com/yukinagae/genkit-go-plugins/plugins/openai"
 )
 
 func main() {
